@@ -1,0 +1,150 @@
+import discord
+from discord.ext import commands
+from discord.ui import Button, View, Modal, TextInput
+from datetime import datetime
+import asyncio
+import os, json
+import config
+
+bot = commands.Bot(command_prefix=config.PREFIX, intents=discord.Intents.all())
+
+# -=================================-
+
+CHANNELS_FILE = 'channels.json'
+
+def load_channel_ids():
+    if os.path.exists(CHANNELS_FILE):
+        with open(CHANNELS_FILE, 'r') as f:
+            return json.load(f)
+    return []
+
+def save_channel_ids(channel_ids):
+    with open(CHANNELS_FILE, 'w') as f:
+        json.dump(channel_ids, f)
+
+
+# ID specjalnego kanału głosowego, który wywołuje tworzenie nowego kanału
+special_channel_id = 1280078707817713737
+
+# Załaduj ID kanałów z pliku
+channel_ids = load_channel_ids()
+
+@bot.event
+async def on_ready():
+    print(f'Zalogowano jako {bot.user}')
+    # Uruchom cykliczne sprawdzanie pustych kanałów
+    bot.loop.create_task(check_and_delete_empty_channels())
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if after.channel and after.channel.id == special_channel_id:
+        guild = member.guild
+        category = after.channel.category
+
+        new_channel = await guild.create_voice_channel(
+            name=f'Pokój {member.name}',
+            category=category,
+            user_limit=5
+        )
+
+        # Zapisz ID nowo utworzonego kanału
+        channel_ids.append(new_channel.id)
+        save_channel_ids(channel_ids)
+
+        await member.move_to(new_channel)
+
+        embed = discord.Embed(
+            description="🔒 - Ustawienie Kanału Prywatnego/Publicznego\n👥 - Ustawienie Ilości Osób na Kanale\n📝 - Ustawienie Nazwy Kanału",
+            colour=0xa800e6,
+            timestamp=datetime.now()
+        )
+        embed.set_author(name="Panel Auto Kanałów")
+        embed.set_footer(text="CodeVerse 2024")
+
+        # Tworzenie przycisków
+        button1 = Button(label="", style=discord.ButtonStyle.green, emoji="🔒")
+        button2 = Button(label="", style=discord.ButtonStyle.green, emoji="👥")
+        button3 = Button(label="", style=discord.ButtonStyle.green, emoji="📝")
+
+        # Definicje callbacków przycisków
+        async def set_private_public(interaction: discord.Interaction):
+            current_permission = new_channel.overwrites_for(guild.default_role)
+            if current_permission.view_channel:
+                await new_channel.set_permissions(guild.default_role, view_channel=False)
+                await interaction.response.send_message("Kanał ustawiony na prywatny.", ephemeral=True)
+            else:
+                await new_channel.set_permissions(guild.default_role, view_channel=True)
+                await interaction.response.send_message("Kanał ustawiony na publiczny.", ephemeral=True)
+
+        async def set_user_limit(interaction: discord.Interaction):
+            modal = LimitModal(new_channel)
+            await interaction.response.send_modal(modal)
+
+        async def set_channel_name(interaction: discord.Interaction):
+            modal = NameModal(new_channel)
+            await interaction.response.send_modal(modal)
+
+        button1.callback = set_private_public
+        button2.callback = set_user_limit
+        button3.callback = set_channel_name
+
+        view = View()
+        view.add_item(button1)
+        view.add_item(button2)
+        view.add_item(button3)
+
+        settings_message = await member.send(embed=embed, view=view)
+
+        while True:
+            await asyncio.sleep(1)
+            if len(new_channel.members) == 0:
+                await new_channel.delete()
+                await settings_message.delete()
+                break
+
+# Modal do ustawiania limitu użytkowników
+class LimitModal(Modal):
+    def __init__(self, new_channel):
+        super().__init__(title="Ustaw limit osób")
+        self.new_channel = new_channel
+        self.limit_input = TextInput(label="Podaj nowy limit osób", placeholder="Wpisz liczbę...", min_length=1, max_length=3)
+
+        self.add_item(self.limit_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            new_limit = int(self.limit_input.value)
+            await self.new_channel.edit(user_limit=new_limit)
+            await interaction.response.send_message(f"Limit osób został ustawiony na {new_limit}.", ephemeral=True)
+        except ValueError:
+            await interaction.response.send_message("Proszę podać prawidłową liczbę.", ephemeral=True)
+
+# Modal do ustawiania nazwy kanału
+class NameModal(Modal):
+    def __init__(self, new_channel):
+        super().__init__(title="Ustaw nazwę kanału")
+        self.new_channel = new_channel
+        self.name_input = TextInput(label="Podaj nową nazwę kanału", placeholder="Wpisz nazwę...", max_length=50)
+
+        self.add_item(self.name_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        new_name = self.name_input.value
+        await self.new_channel.edit(name=new_name)
+        await interaction.response.send_message(f"Nazwa kanału została zmieniona na {new_name}.", ephemeral=True)
+
+async def check_and_delete_empty_channels():
+    global channel_ids
+    while True:
+        for guild in bot.guilds:
+            for channel_id in channel_ids:
+                channel = guild.get_channel(channel_id)
+                if channel and isinstance(channel, discord.VoiceChannel) and len(channel.members) == 0:
+                    await channel.delete()
+                    channel_ids.remove(channel_id)
+                    save_channel_ids(channel_ids)
+        await asyncio.sleep(60)  # Sprawdzaj co 60 sekund
+
+# -=================================-
+
+bot.run(config.TOKEN)
